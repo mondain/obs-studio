@@ -9,6 +9,8 @@
 #include <atomic>
 #include <mutex>
 #include <thread>
+#include <iostream>
+#include <vector>
 
 #include <rtc/rtc.h>
 
@@ -37,10 +39,11 @@ private:
 				 std::string cname);
 	void ConfigureVideoTrack(std::string media_stream_id,
 				 std::string cname);
+    bool Init();
 	bool Setup();
 	bool Connect();
 	void StartThread();
-
+    void SendOptions();
 	void SendDelete();
 	void StopThread(bool signal);
 
@@ -51,6 +54,8 @@ private:
 	std::string endpoint_url;
 	std::string bearer_token;
 	std::string resource_url;
+    // turn server url and any params
+	std::string turn_url;
 
 	std::atomic<bool> running;
 
@@ -91,7 +96,7 @@ static size_t curl_writefunction(char *data, size_t size, size_t nmemb,
 
 #define LOCATION_HEADER_LENGTH 10
 
-static size_t curl_headerfunction(char *data, size_t size, size_t nmemb,
+static size_t curl_header_location_function(char *data, size_t size, size_t nmemb,
 				  void *priv_data)
 {
 	auto header_buffer = static_cast<std::string *>(priv_data);
@@ -104,6 +109,27 @@ static size_t curl_headerfunction(char *data, size_t size, size_t nmemb,
 	if (!astrcmpi_n(data, "location: ", LOCATION_HEADER_LENGTH)) {
 		char *val = data + LOCATION_HEADER_LENGTH;
 		header_buffer->append(val, real_size - LOCATION_HEADER_LENGTH);
+		*header_buffer = trim_string(*header_buffer);
+	}
+
+	return real_size;
+}
+
+#define LINK_HEADER_LENGTH 6
+
+static size_t curl_header_link_function(char *data, size_t size, size_t nmemb,
+				  void *priv_data)
+{
+	auto header_buffer = static_cast<std::string *>(priv_data);
+
+	size_t real_size = size * nmemb;
+
+	if (real_size < LINK_HEADER_LENGTH)
+		return real_size;
+
+	if (!astrcmpi_n(data, "link: ", LINK_HEADER_LENGTH)) {
+		char *val = data + LINK_HEADER_LENGTH;
+		header_buffer->append(val, real_size - LINK_HEADER_LENGTH);
 		*header_buffer = trim_string(*header_buffer);
 	}
 

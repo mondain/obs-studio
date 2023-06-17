@@ -340,8 +340,8 @@ jobs:
       matrix:
         arch: [x64, x86]
     env:
-      CMAKE_GENERATOR: 'Visual Studio 17 2022'
-      CMAKE_SYSTEM_VERSION: '10.0.18363.657'
+      CMAKE_GENERATOR: '"Visual Studio 17 2022"'
+      CMAKE_SYSTEM_VERSION: ${{ env.CMAKE_SYSTEM_VERSION }}
       VIRTUALCAM-GUID: 'A3FCE0F5-3493-419F-958A-ABA1250EC20B'
       BUILD_FOR_DISTRIBUTION: ${{ startsWith(github.ref, 'refs/tags/') && github.event_name != 'pull_request' }}
     defaults:

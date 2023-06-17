@@ -150,7 +150,11 @@ void WHIPOutput::ConfigureVideoTrack(std::string media_stream_id,
 	rtcChainRtcpNackResponder(video_track, 1000);
 }
 
-bool WHIPOutput::Setup()
+/**
+ * @brief Init before OPTIONS and Setup due to the need of the endpoint url for SendOptions.
+ * 
+ */
+bool WHIPOutput::Init()
 {
 	obs_service_t *service = obs_output_get_service(output);
 	if (!service) {
@@ -166,9 +170,29 @@ bool WHIPOutput::Setup()
 	}
 	bearer_token = obs_service_get_connect_info(
 		service, OBS_SERVICE_CONNECT_INFO_BEARER_TOKEN);
+	
+	return true;
+}
 
+/**
+ * @brief Set up the PeerConnection and media tracks.
+ * 
+ * @return true 
+ * @return false 
+ */
+bool WHIPOutput::Setup()
+{
 	rtcConfiguration config;
-	memset(&config, 0, sizeof(config));
+   	memset(&config, 0, sizeof(config));
+
+	// XXX(paul) creating IceServers for the turn_url and add to config
+	if (!turn_url.empty()) {
+    	const char** iceServers = new const char*[1];
+        iceServers[0] = turn_url.c_str();
+		config.iceServers = iceServers;
+		config.iceServersCount = 1;
+		do_log(LOG_DEBUG, "Ice servers: %d configured: %s", 1, iceServers[0]);
+	}
 
 	peer_connection = rtcCreatePeerConnection(&config);
 	rtcSetUserPointer(peer_connection, this);
@@ -251,11 +275,12 @@ bool WHIPOutput::Connect()
 	std::string location_header;
 	char offer_sdp[4096] = {0};
 	rtcGetLocalDescription(peer_connection, offer_sdp, sizeof(offer_sdp));
+	// TODO(paul) add sprops to the h264 media desc in our offer
 
 	CURL *c = curl_easy_init();
 	curl_easy_setopt(c, CURLOPT_WRITEFUNCTION, curl_writefunction);
 	curl_easy_setopt(c, CURLOPT_WRITEDATA, (void *)&read_buffer);
-	curl_easy_setopt(c, CURLOPT_HEADERFUNCTION, curl_headerfunction);
+	curl_easy_setopt(c, CURLOPT_HEADERFUNCTION, curl_header_location_function);
 	curl_easy_setopt(c, CURLOPT_HEADERDATA, (void *)&location_header);
 	curl_easy_setopt(c, CURLOPT_HTTPHEADER, headers);
 	curl_easy_setopt(c, CURLOPT_URL, endpoint_url.c_str());
@@ -323,21 +348,81 @@ bool WHIPOutput::Connect()
 	return true;
 }
 
-void WHIPOutput::StartThread()
+void WHIPOutput::SendOptions()
 {
-	if (!Setup())
-		return;
-
-	if (!Connect()) {
-		rtcDeletePeerConnection(peer_connection);
-		peer_connection = -1;
-		audio_track = -1;
-		video_track = -1;
+	if (endpoint_url.empty()) {
+		do_log(LOG_DEBUG,
+		       "No endpoint URL available, not sending OPTIONS");
 		return;
 	}
 
-	obs_output_begin_data_capture(output, 0);
-	running = true;
+	struct curl_slist *headers = NULL;
+	if (!bearer_token.empty()) {
+		auto bearer_token_header =
+			std::string("Authorization: Bearer ") + bearer_token;
+		headers =
+			curl_slist_append(headers, bearer_token_header.c_str());
+	}
+
+	std::string link_header;
+
+	CURL *c = curl_easy_init();
+	curl_easy_setopt(c, CURLOPT_HEADERFUNCTION, curl_header_link_function);
+	curl_easy_setopt(c, CURLOPT_HEADERDATA, (void *)&link_header);
+	curl_easy_setopt(c, CURLOPT_HTTPHEADER, headers);
+	curl_easy_setopt(c, CURLOPT_URL, endpoint_url.c_str());
+	curl_easy_setopt(c, CURLOPT_CUSTOMREQUEST, "OPTIONS");
+	curl_easy_setopt(c, CURLOPT_TIMEOUT, 8L);
+
+	auto cleanup = [&]() {
+		curl_easy_cleanup(c);
+		curl_slist_free_all(headers);
+	};
+
+	CURLcode res = curl_easy_perform(c);
+	if (res == CURLE_OK) {
+		long response_code;
+		curl_easy_getinfo(c, CURLINFO_RESPONSE_CODE, &response_code);
+		// expected response per draft on OPTIONS is 200
+		if (response_code == 200) {
+			if (!link_header.empty()) {
+				do_log(LOG_INFO,
+				    "WHIP server provided a TURN server via the Link header");
+				struct curl_header *link_header_data;
+				CURLHcode h = curl_easy_header(c, "Link", 0, CURLH_HEADER, -1,
+				    &link_header_data);
+				// <stun:stun3.l.google.com:19302>; rel="ice-server"
+				do_log(LOG_INFO,
+					"Successfully performed OPTIONS request for endpoint URL: %s",
+					link_header_data->value);
+				// parse link_header for TURN/STUN information
+				std::string str(link_header_data->value);
+				if (!str.empty()) {
+					std::size_t pos = 0, endpos = 0;
+					pos = str.find("<", 0) + 1;
+					endpos = str.find(">");
+					do_log(LOG_INFO, "Pos: %d %d %d", pos, endpos, std::string::npos);
+					turn_url = str.substr(pos, endpos - pos);
+					if (turn_url.empty()) {
+						do_log(LOG_WARNING, "Unable to process OPTIONS response");
+					} else {
+						do_log(LOG_INFO, "WHIP TURN/STUN is: %s", turn_url.c_str());
+					}
+				}
+				//curl_free(link_header_data);
+				link_header.clear();
+			}
+		} else {
+			do_log(LOG_WARNING,
+			"OPTIONS request for endpoint URL failed. HTTP Code: %ld",
+			response_code);
+		}
+	} else {
+		do_log(LOG_WARNING,
+	       "OPTIONS request for endpoint URL failed. Reason: %s",
+	       curl_easy_strerror(res));
+	}
+	cleanup();
 }
 
 void WHIPOutput::SendDelete()
@@ -390,6 +475,29 @@ void WHIPOutput::SendDelete()
 	       "Successfully performed DELETE request for resource URL");
 	resource_url.clear();
 	cleanup();
+}
+
+void WHIPOutput::StartThread()
+{
+	if (!Init())
+		return;
+
+	// send OPTIONS request in attempt to get Link information (turn/stun server)
+	SendOptions();
+
+	if (!Setup())
+		return;
+
+	if (!Connect()) {
+		rtcDeletePeerConnection(peer_connection);
+		peer_connection = -1;
+		audio_track = -1;
+		video_track = -1;
+		return;
+	}
+
+	obs_output_begin_data_capture(output, 0);
+	running = true;
 }
 
 void WHIPOutput::StopThread(bool signal)
