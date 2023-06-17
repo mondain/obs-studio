@@ -1,5 +1,8 @@
 #include "whip-output.h"
 
+#include <cstdint>
+#include <vector>
+
 const int signaling_media_id_length = 16;
 const char signaling_media_id_valid_char[] = "0123456789"
 					     "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
@@ -531,9 +534,41 @@ void WHIPOutput::StopThread(bool signal)
 
 void WHIPOutput::Send(void *data, uintptr_t size, uint64_t duration, int track)
 {
-	if (!running)
+	// packet contents and length
+	const char *data_bytes = reinterpret_cast<const char *>(data);
+	int data_len = (int) size;
+	// XXX(paul) observe video for SPS/PPS so they may be included in SDP sprops
+	if (!got_critical_video && track == video_track) {
+		do_log(LOG_INFO, "Checking video for critical data; length: %d", data_len);
+		// is the content SPS/PPS and if so, encode it for our offer SDP
+		std::vector<std::vector<uint8_t>> nalus = parse_h264_nals(data_bytes, data_len);
+		do_log(LOG_INFO, "NALU count: %d", nalus.size());
+		char* encoded;
+		for (const auto& nalu : nalus) {
+			int naluType = nalu[0] & 0x1F;
+			if (naluType == 7) { // SPS NALU found
+				do_log(LOG_DEBUG, "SPS NALU found!");
+				sprop_parameter_sets = "sprop_parameter_sets=";
+				encoded = curl_easy_escape(nullptr, (const char *) nalu.data(), (int) nalu.size());
+				do_log(LOG_INFO, "SPS Base64 encoded: %s", encoded);
+				sprop_parameter_sets += std::string(encoded);
+				sprop_parameter_sets += ",";
+			} else if (naluType == 8) { // PPS NALU found
+				do_log(LOG_DEBUG, "PPS NALU found!");
+				encoded = curl_easy_escape(nullptr, (const char *) nalu.data(), (int) nalu.size());
+				do_log(LOG_INFO, "PPS Base64 encoded: %s", encoded);
+				sprop_parameter_sets += std::string(encoded);
+				sprop_parameter_sets += ";";
+			}
+		}
+		curl_free(encoded);
+		do_log(LOG_INFO, "Parameter set: %s", sprop_parameter_sets.c_str());
+		got_critical_video = !sprop_parameter_sets.empty();
+	}
+	// don't send media unless we're running
+	if (!running) {
 		return;
-
+	}
 	// sample time is in us, we need to convert it to seconds
 	auto elapsed_seconds = double(duration) / (1000.0 * 1000.0);
 
@@ -547,8 +582,8 @@ void WHIPOutput::Send(void *data, uintptr_t size, uint64_t duration, int track)
 	rtcGetCurrentTrackTimestamp(track, &current_timestamp);
 	rtcSetTrackRtpTimestamp(track, current_timestamp + elapsed_timestamp);
 
-	total_bytes_sent += size;
-	rtcSendMessage(track, reinterpret_cast<const char *>(data), (int)size);
+	total_bytes_sent += data_len;
+	rtcSendMessage(track, data_bytes, data_len);
 }
 
 void register_whip_output()

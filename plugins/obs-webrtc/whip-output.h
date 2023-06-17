@@ -58,6 +58,11 @@ private:
 	std::string turn_url;
 
 	std::atomic<bool> running;
+	
+	// whether or not we've collected video private data
+	std::atomic<bool> got_critical_video;
+	// sprops for h264
+	std::string sprop_parameter_sets;
 
 	std::mutex start_stop_mutex;
 	std::thread start_stop_thread;
@@ -134,4 +139,42 @@ static size_t curl_header_link_function(char *data, size_t size, size_t nmemb,
 	}
 
 	return real_size;
+}
+
+static std::vector<std::vector<uint8_t>> parse_h264_nals(const char* data, size_t length) {
+    std::vector<std::vector<uint8_t>> nalus;
+
+    const char* end = data + length;
+    const char* start = data;
+    const char* current = data;
+
+    while (current < end) {
+        // Find the start code prefix (0x000001 or 0x00000001)
+        if (current[0] == 0x00 && current[1] == 0x00 && (current[2] == 0x01 || (current[2] == 0x00 && current[3] == 0x01))) {
+            if (start < current) {
+                // Extract the NALU unit
+                size_t nalSize = current - start;
+                nalus.emplace_back(start, start + nalSize);
+            }
+
+            // Move the start pointer to the next NALU
+            start = current + 3;
+            if (current[2] == 0x00)
+                start++;
+
+            // Skip the start code prefix
+            current += 3;
+            if (current[0] == 0x00)
+                current++;
+        } else {
+            current++;
+        }
+    }
+
+    // Extract the last NALU unit
+    size_t nalSize = current - start;
+    if (nalSize > 0)
+        nalus.emplace_back(start, start + nalSize);
+
+    return nalus;
 }
