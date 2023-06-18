@@ -548,7 +548,7 @@ void WHIPOutput::Send(void *data, uintptr_t size, uint64_t duration, int track)
 			int naluType = nalu[0] & 0x1F;
 			if (naluType == 7) { // SPS NALU found
 				do_log(LOG_DEBUG, "SPS NALU found!");
-				sprop_parameter_sets = "sprop_parameter_sets=";
+				sprop_parameter_sets = "sprop-parameter-sets=";
 				encoded = curl_easy_escape(nullptr, (const char *) nalu.data(), (int) nalu.size());
 				do_log(LOG_INFO, "SPS Base64 encoded: %s", encoded);
 				sprop_parameter_sets += std::string(encoded);
