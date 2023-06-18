@@ -1,0 +1,5 @@
+Add the remote
+git remote add my-remote <remote-url>
+
+Push to the remote
+git push my-remote <branch-name>
