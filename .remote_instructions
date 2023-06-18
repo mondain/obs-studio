@@ -1,5 +1,10 @@
 Add the remote
 git remote add my-remote <remote-url>
 
+example: git remote add my-remote git@github.com:mondain/obs-studio.git
+
 Push to the remote
 git push my-remote <branch-name>
+
+example: git push my-remote whip-enhancement
+
