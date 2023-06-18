@@ -1,8 +1,5 @@
 #include "whip-output.h"
 
-#include <cstdint>
-#include <vector>
-
 const int signaling_media_id_length = 16;
 const char signaling_media_id_valid_char[] = "0123456789"
 					     "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
@@ -55,6 +52,58 @@ bool WHIPOutput::Start()
 	if (!obs_output_initialize_encoders(output, 0))
 		return false;
 
+	// get video extra data as needed
+	obs_encoder_t *video_enc = obs_output_get_video_encoder(output);
+	if (video_enc) {
+		// TODO(paul) add check the ensure this is h264, not all codecs have extra data
+		do_log(LOG_INFO, "Got video encoder");
+	    uint8_t *header;
+	    size_t size;
+		struct encoder_packet packet = {};
+		packet.type = OBS_ENCODER_VIDEO;
+		packet.timebase_den = 1;
+		packet.keyframe = true;
+		if (obs_encoder_get_extra_data(video_enc, &header, &size)) {
+			do_log(LOG_INFO, "Got video extra data, size: %d", size);
+			packet.size = obs_parse_avc_header(&packet.data, header, size);
+			do_log(LOG_INFO, "Checking video for critical data; length: %d", packet.size);
+			do_log(LOG_INFO, "Sample critical data: %d, %d, %d, %d", packet.data[0], packet.data[1], packet.data[2], packet.data[3]);
+			// base64 encode the SPS/PPS data for our offer SDP
+			/*
+			std::vector<std::vector<uint8_t>> nalus = parse_h264_nals((const char *) &packet.data, packet.size);
+			do_log(LOG_DEBUG, "NALU count: %d", nalus.size());
+			char* encoded;
+			for (const auto& nalu : nalus) {
+				int naluType = nalu[0] & 0x1F;
+				if (naluType == OBS_NAL_SPS) { // SPS NALU found
+					do_log(LOG_DEBUG, "SPS NALU found!");
+					sprop_parameter_sets = "sprop-parameter-sets=";
+					encoded = curl_easy_escape(nullptr, (const char *) nalu.data(), (int) nalu.size());
+					do_log(LOG_DEBUG, "SPS Base64 encoded: %s", encoded);
+					sprop_parameter_sets += std::string(encoded);
+					sprop_parameter_sets += ",";
+				} else if (naluType == OBS_NAL_PPS) { // PPS NALU found
+					do_log(LOG_DEBUG, "PPS NALU found!");
+					encoded = curl_easy_escape(nullptr, (const char *) nalu.data(), (int) nalu.size());
+					do_log(LOG_DEBUG, "PPS Base64 encoded: %s", encoded);
+					sprop_parameter_sets += std::string(encoded);
+					sprop_parameter_sets += ";";
+				}
+			}
+			if (sprop_parameter_sets.empty()) {
+				do_log(LOG_DEBUG, "No h264 critical data available");
+			} else {
+				char escape = '%';
+				auto updated = std::remove(sprop_parameter_sets.begin(), sprop_parameter_sets.end(), escape);
+				sprop_parameter_sets.erase(updated, sprop_parameter_sets.end());
+				do_log(LOG_INFO, "Parameter set: %s", sprop_parameter_sets.c_str());
+				got_critical_video = !sprop_parameter_sets.empty();
+			}
+			curl_free(encoded);
+			*/
+		}
+	}
+
 	if (start_stop_thread.joinable())
 		start_stop_thread.join();
 	start_stop_thread = std::thread(&WHIPOutput::StartThread, this);
@@ -73,20 +122,22 @@ void WHIPOutput::Stop(bool signal)
 
 void WHIPOutput::Data(struct encoder_packet *packet)
 {
-	if (!packet) {
+	if (packet) {
+		// don't send media unless we're running
+		if (running) {
+			if (packet->type == OBS_ENCODER_AUDIO) {
+				int64_t duration = packet->dts_usec - last_audio_timestamp;
+				Send(packet->data, packet->size, duration, audio_track);
+				last_audio_timestamp = packet->dts_usec;
+			} else if (packet->type == OBS_ENCODER_VIDEO) {
+				int64_t duration = packet->dts_usec - last_video_timestamp;
+				Send(packet->data, packet->size, duration, video_track);
+				last_video_timestamp = packet->dts_usec;
+			}
+		}
+	} else {
 		Stop(false);
 		obs_output_signal_stop(output, OBS_OUTPUT_ENCODE_ERROR);
-		return;
-	}
-
-	if (packet->type == OBS_ENCODER_AUDIO) {
-		int64_t duration = packet->dts_usec - last_audio_timestamp;
-		Send(packet->data, packet->size, duration, audio_track);
-		last_audio_timestamp = packet->dts_usec;
-	} else if (packet->type == OBS_ENCODER_VIDEO) {
-		int64_t duration = packet->dts_usec - last_video_timestamp;
-		Send(packet->data, packet->size, duration, video_track);
-		last_video_timestamp = packet->dts_usec;
 	}
 }
 
@@ -278,7 +329,29 @@ bool WHIPOutput::Connect()
 	std::string location_header;
 	char offer_sdp[4096] = {0};
 	rtcGetLocalDescription(peer_connection, offer_sdp, sizeof(offer_sdp));
+
 	// TODO(paul) add sprops to the h264 media desc in our offer
+	if (!sprop_parameter_sets.empty()) {
+		struct dstr dyn_offer;
+		dstr_init(&dyn_offer);
+		dstr_init_move_array(&dyn_offer, offer_sdp);
+		std::string mode_str = "packetization-mode=1";
+		sprop_parameter_sets += mode_str;
+		const char *replacement = sprop_parameter_sets.c_str();
+		// dirty munge by finding the packetization-mode=1 entry
+		dstr_replace(&dyn_offer, mode_str.c_str(), replacement);
+		// replace offer with munged version
+		///std::string munged_offer(dyn_offer.array);
+		///offer_sdp = munged_offer.c_str();
+		do_log(LOG_INFO, "Munged dynamic: %s %d", dyn_offer.array, dyn_offer.len);
+		//offer_sdp = dyn_offer.array;
+		// clean ups
+		dstr_free(&dyn_offer);
+		///munged_offer.clear();
+		sprop_parameter_sets.clear();
+		mode_str.clear();
+		do_log(LOG_INFO, "Munged offer: %s", offer_sdp);
+	}
 
 	CURL *c = curl_easy_init();
 	curl_easy_setopt(c, CURLOPT_WRITEFUNCTION, curl_writefunction);
@@ -485,7 +558,7 @@ void WHIPOutput::StartThread()
 	if (!Init())
 		return;
 
-	// send OPTIONS request in attempt to get Link information (turn/stun server)
+	// send OPTIONS to get Link information (turn/stun server)
 	SendOptions();
 
 	if (!Setup())
@@ -537,45 +610,13 @@ void WHIPOutput::Send(void *data, uintptr_t size, uint64_t duration, int track)
 	// packet contents and length
 	const char *data_bytes = reinterpret_cast<const char *>(data);
 	int data_len = (int) size;
-	// XXX(paul) observe video for SPS/PPS so they may be included in SDP sprops
-	if (!got_critical_video && track == video_track) {
-		do_log(LOG_INFO, "Checking video for critical data; length: %d", data_len);
-		// is the content SPS/PPS and if so, encode it for our offer SDP
-		std::vector<std::vector<uint8_t>> nalus = parse_h264_nals(data_bytes, data_len);
-		do_log(LOG_INFO, "NALU count: %d", nalus.size());
-		char* encoded;
-		for (const auto& nalu : nalus) {
-			int naluType = nalu[0] & 0x1F;
-			if (naluType == 7) { // SPS NALU found
-				do_log(LOG_DEBUG, "SPS NALU found!");
-				sprop_parameter_sets = "sprop-parameter-sets=";
-				encoded = curl_easy_escape(nullptr, (const char *) nalu.data(), (int) nalu.size());
-				do_log(LOG_INFO, "SPS Base64 encoded: %s", encoded);
-				sprop_parameter_sets += std::string(encoded);
-				sprop_parameter_sets += ",";
-			} else if (naluType == 8) { // PPS NALU found
-				do_log(LOG_DEBUG, "PPS NALU found!");
-				encoded = curl_easy_escape(nullptr, (const char *) nalu.data(), (int) nalu.size());
-				do_log(LOG_INFO, "PPS Base64 encoded: %s", encoded);
-				sprop_parameter_sets += std::string(encoded);
-				sprop_parameter_sets += ";";
-			}
-		}
-		curl_free(encoded);
-		do_log(LOG_INFO, "Parameter set: %s", sprop_parameter_sets.c_str());
-		got_critical_video = !sprop_parameter_sets.empty();
-	}
-	// don't send media unless we're running
-	if (!running) {
-		return;
-	}
 	// sample time is in us, we need to convert it to seconds
 	auto elapsed_seconds = double(duration) / (1000.0 * 1000.0);
 
 	// get elapsed time in clock rate
 	uint32_t elapsed_timestamp = 0;
 	rtcTransformSecondsToTimestamp(track, elapsed_seconds,
-				       &elapsed_timestamp);
+					&elapsed_timestamp);
 
 	// set new timestamp
 	uint32_t current_timestamp = 0;

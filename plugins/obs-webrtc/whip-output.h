@@ -1,6 +1,10 @@
 #pragma once
 #include <obs-module.h>
+#include <obs-avc.h>
+#include <obs-nal.h>
+
 #include <util/curl/curl-helper.h>
+#include <util/array-serializer.h>
 #include <util/platform.h>
 #include <util/base.h>
 #include <util/dstr.h>
@@ -10,6 +14,7 @@
 #include <mutex>
 #include <thread>
 #include <iostream>
+#include <cstdint>
 #include <vector>
 
 #include <rtc/rtc.h>
