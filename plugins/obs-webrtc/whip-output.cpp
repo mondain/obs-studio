@@ -38,9 +38,9 @@ WHIPOutput::~WHIPOutput()
 {
 	Stop();
 
-	std::lock_guard<std::mutex> l(start_stop_mutex);
-	if (start_stop_thread.joinable())
-		start_stop_thread.join();
+	// std::lock_guard<std::mutex> l(start_stop_mutex);
+	// if (start_stop_thread.joinable())
+	// 	start_stop_thread.join();
 }
 
 bool WHIPOutput::Start()
@@ -52,53 +52,9 @@ bool WHIPOutput::Start()
 	if (!obs_output_initialize_encoders(output, 0))
 		return false;
 
-	// get video extra data as needed
-	obs_encoder_t *video_enc = obs_output_get_video_encoder(output);
-	if (video_enc) {
-		// TODO(paul) add check the ensure this is h264, not all codecs have extra data
-		do_log(LOG_INFO, "Got video encoder");
-	    uint8_t *header;
-	    size_t size;
-		if (obs_encoder_get_extra_data(video_enc, &header, &size)) {
-			do_log(LOG_INFO, "Got video extra data, size: %d", size);
-			do_log(LOG_INFO, "Sample critical data: %d, %d, %d, %d", header[0], header[1], header[2], header[3]);
-			// base64 encode the SPS/PPS data for our offer SDP
-			std::vector<std::vector<uint8_t>> nalus = parse_h264_nals((const char *) header, size);
-			do_log(LOG_DEBUG, "NALU count: %d", nalus.size());
-			char* encoded;
-			for (const auto& nalu : nalus) {
-				int naluType = nalu[0] & 0x1F;
-				if (naluType == OBS_NAL_SPS) { // SPS NALU found
-					do_log(LOG_DEBUG, "SPS NALU found!");
-					sprop_parameter_sets = "sprop-parameter-sets=";
-					encoded = curl_easy_escape(nullptr, (const char *) nalu.data(), (int) nalu.size());
-					do_log(LOG_DEBUG, "SPS Base64 encoded: %s", encoded);
-					sprop_parameter_sets += std::string(encoded);
-					sprop_parameter_sets += ",";
-				} else if (naluType == OBS_NAL_PPS) { // PPS NALU found
-					do_log(LOG_DEBUG, "PPS NALU found!");
-					encoded = curl_easy_escape(nullptr, (const char *) nalu.data(), (int) nalu.size());
-					do_log(LOG_DEBUG, "PPS Base64 encoded: %s", encoded);
-					sprop_parameter_sets += std::string(encoded);
-					sprop_parameter_sets += ";";
-				}
-			}
-			if (sprop_parameter_sets.empty()) {
-				do_log(LOG_DEBUG, "No h264 critical data available");
-			} else {
-				char escape = '%';
-				auto updated = std::remove(sprop_parameter_sets.begin(), sprop_parameter_sets.end(), escape);
-				sprop_parameter_sets.erase(updated, sprop_parameter_sets.end());
-				do_log(LOG_INFO, "Parameter set: %s", sprop_parameter_sets.c_str());
-				got_critical_video = !sprop_parameter_sets.empty();
-			}
-			curl_free(encoded);
-		}
-		bfree(header);
-	}
-
 	if (start_stop_thread.joinable())
 		start_stop_thread.join();
+
 	start_stop_thread = std::thread(&WHIPOutput::StartThread, this);
 
 	return true;
@@ -218,6 +174,51 @@ bool WHIPOutput::Init()
 	bearer_token = obs_service_get_connect_info(
 		service, OBS_SERVICE_CONNECT_INFO_BEARER_TOKEN);
 	
+	// get video extra data as needed
+	obs_encoder_t *video_enc = obs_output_get_video_encoder(output);
+	if (video_enc) {
+		// TODO(paul) add check the ensure this is h264, not all codecs have extra data
+		do_log(LOG_INFO, "Got video encoder");
+	    uint8_t *header;
+	    size_t size;
+		if (obs_encoder_get_extra_data(video_enc, &header, &size)) {
+			do_log(LOG_INFO, "Got video extra data, size: %d", size);
+			do_log(LOG_INFO, "Sample critical data: %d, %d, %d, %d", header[0], header[1], header[2], header[3]);
+			// base64 encode the SPS/PPS data for our offer SDP
+			std::vector<std::vector<uint8_t>> nalus = parse_h264_nals((const char *) header, size);
+			do_log(LOG_DEBUG, "NALU count: %d", nalus.size());
+			char* encoded;
+			for (const auto& nalu : nalus) {
+				int naluType = nalu[0] & 0x1F;
+				if (naluType == OBS_NAL_SPS) { // SPS NALU found
+					do_log(LOG_DEBUG, "SPS NALU found!");
+					sprop_parameter_sets = "sprop-parameter-sets=";
+					encoded = curl_easy_escape(nullptr, (const char *) nalu.data(), (int) nalu.size());
+					do_log(LOG_DEBUG, "SPS Base64 encoded: %s", encoded);
+					sprop_parameter_sets += std::string(encoded);
+					sprop_parameter_sets += ",";
+				} else if (naluType == OBS_NAL_PPS) { // PPS NALU found
+					do_log(LOG_DEBUG, "PPS NALU found!");
+					encoded = curl_easy_escape(nullptr, (const char *) nalu.data(), (int) nalu.size());
+					do_log(LOG_DEBUG, "PPS Base64 encoded: %s", encoded);
+					sprop_parameter_sets += std::string(encoded);
+					sprop_parameter_sets += ";";
+				}
+			}
+			if (sprop_parameter_sets.empty()) {
+				do_log(LOG_DEBUG, "No h264 critical data available");
+			} else {
+				char escape = '%';
+				auto updated = std::remove(sprop_parameter_sets.begin(), sprop_parameter_sets.end(), escape);
+				sprop_parameter_sets.erase(updated, sprop_parameter_sets.end());
+				do_log(LOG_INFO, "Parameter set: %s", sprop_parameter_sets.c_str());
+				got_critical_video = !sprop_parameter_sets.empty();
+			}
+			curl_free(encoded);
+		}
+		bfree(header);
+	}
+
 	return true;
 }
 
@@ -360,7 +361,7 @@ bool WHIPOutput::Connect()
 	    curl_easy_setopt(c, CURLOPT_COPYPOSTFIELDS, munged_sdp.c_str());
 		// clean ups
 		sprop_parameter_sets.clear();
-		//munged_sdp.clear();
+		munged_sdp.clear();
 	}
 
 	auto cleanup = [&]() {
