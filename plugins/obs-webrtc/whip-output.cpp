@@ -187,34 +187,31 @@ bool WHIPOutput::Init()
 			// base64 encode the SPS/PPS data for our offer SDP
 			std::vector<std::vector<uint8_t>> nalus = parse_h264_nals((const char *) header, size);
 			do_log(LOG_DEBUG, "NALU count: %d", nalus.size());
-			char* encoded;
-			for (const auto& nalu : nalus) {
+			for (std::vector<uint8_t> &nalu : nalus) {
 				int naluType = nalu[0] & 0x1F;
 				if (naluType == OBS_NAL_SPS) { // SPS NALU found
 					do_log(LOG_DEBUG, "SPS NALU found!");
 					sprop_parameter_sets = "sprop-parameter-sets=";
-					encoded = curl_easy_escape(nullptr, (const char *) nalu.data(), (int) nalu.size());
-					do_log(LOG_DEBUG, "SPS Base64 encoded: %s", encoded);
-					sprop_parameter_sets += std::string(encoded);
+					std::string encoded = b64_encode(reinterpret_cast<const char *>(nalu.data()), nalu.size());
+					do_log(LOG_DEBUG, "SPS Base64 encoded: %s", encoded.c_str());
+					sprop_parameter_sets += encoded;
 					sprop_parameter_sets += ",";
+					encoded.clear();
 				} else if (naluType == OBS_NAL_PPS) { // PPS NALU found
 					do_log(LOG_DEBUG, "PPS NALU found!");
-					encoded = curl_easy_escape(nullptr, (const char *) nalu.data(), (int) nalu.size());
-					do_log(LOG_DEBUG, "PPS Base64 encoded: %s", encoded);
-					sprop_parameter_sets += std::string(encoded);
+					std::string encoded = b64_encode(reinterpret_cast<const char *>(nalu.data()), nalu.size());
+					do_log(LOG_DEBUG, "PPS Base64 encoded: %s", encoded.c_str());
+					sprop_parameter_sets += encoded;
 					sprop_parameter_sets += ";";
+					encoded.clear();
 				}
 			}
 			if (sprop_parameter_sets.empty()) {
 				do_log(LOG_DEBUG, "No h264 critical data available");
 			} else {
-				char escape = '%';
-				auto updated = std::remove(sprop_parameter_sets.begin(), sprop_parameter_sets.end(), escape);
-				sprop_parameter_sets.erase(updated, sprop_parameter_sets.end());
 				do_log(LOG_INFO, "Parameter set: %s", sprop_parameter_sets.c_str());
-				got_critical_video = !sprop_parameter_sets.empty();
+				got_critical_video = true;
 			}
-			curl_free(encoded);
 		}
 		bfree(header);
 	}
