@@ -210,7 +210,6 @@ bool WHIPOutput::Init()
 				do_log(LOG_DEBUG, "No h264 critical data available");
 			} else {
 				do_log(LOG_INFO, "Parameter set: %s", sprop_parameter_sets.c_str());
-				got_critical_video = true;
 			}
 		}
 		bfree(header);
@@ -416,6 +415,7 @@ bool WHIPOutput::Connect()
 		curl_url_cleanup(h);
 	}
 
+	do_log(LOG_INFO, "SDP answer: %s",  read_buffer.c_str());
 	rtcSetRemoteDescription(peer_connection, read_buffer.c_str(), "answer");
 	cleanup();
 	return true;

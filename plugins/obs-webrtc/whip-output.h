@@ -63,9 +63,7 @@ private:
 	std::string turn_url;
 
 	std::atomic<bool> running;
-	
-	// whether or not we've collected video private data
-	std::atomic<bool> got_critical_video;
+
 	// sprops for h264
 	std::string sprop_parameter_sets;
 
