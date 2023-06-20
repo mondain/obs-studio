@@ -360,7 +360,7 @@ bool WHIPOutput::Connect()
 	    curl_easy_setopt(c, CURLOPT_COPYPOSTFIELDS, munged_sdp.c_str());
 		// clean ups
 		sprop_parameter_sets.clear();
-		munged_sdp.clear();
+		//munged_sdp.clear();
 	}
 
 	auto cleanup = [&]() {
