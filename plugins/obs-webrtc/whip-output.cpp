@@ -59,18 +59,11 @@ bool WHIPOutput::Start()
 		do_log(LOG_INFO, "Got video encoder");
 	    uint8_t *header;
 	    size_t size;
-		struct encoder_packet packet = {};
-		packet.type = OBS_ENCODER_VIDEO;
-		packet.timebase_den = 1;
-		packet.keyframe = true;
 		if (obs_encoder_get_extra_data(video_enc, &header, &size)) {
 			do_log(LOG_INFO, "Got video extra data, size: %d", size);
-			packet.size = obs_parse_avc_header(&packet.data, header, size);
-			do_log(LOG_INFO, "Checking video for critical data; length: %d", packet.size);
-			do_log(LOG_INFO, "Sample critical data: %d, %d, %d, %d", packet.data[0], packet.data[1], packet.data[2], packet.data[3]);
+			do_log(LOG_INFO, "Sample critical data: %d, %d, %d, %d", header[0], header[1], header[2], header[3]);
 			// base64 encode the SPS/PPS data for our offer SDP
-			/*
-			std::vector<std::vector<uint8_t>> nalus = parse_h264_nals((const char *) &packet.data, packet.size);
+			std::vector<std::vector<uint8_t>> nalus = parse_h264_nals((const char *) header, size);
 			do_log(LOG_DEBUG, "NALU count: %d", nalus.size());
 			char* encoded;
 			for (const auto& nalu : nalus) {
@@ -100,8 +93,8 @@ bool WHIPOutput::Start()
 				got_critical_video = !sprop_parameter_sets.empty();
 			}
 			curl_free(encoded);
-			*/
 		}
+		bfree(header);
 	}
 
 	if (start_stop_thread.joinable())
@@ -327,31 +320,9 @@ bool WHIPOutput::Connect()
 
 	std::string read_buffer;
 	std::string location_header;
+
 	char offer_sdp[4096] = {0};
 	rtcGetLocalDescription(peer_connection, offer_sdp, sizeof(offer_sdp));
-
-	// TODO(paul) add sprops to the h264 media desc in our offer
-	if (!sprop_parameter_sets.empty()) {
-		struct dstr dyn_offer;
-		dstr_init(&dyn_offer);
-		dstr_init_move_array(&dyn_offer, offer_sdp);
-		std::string mode_str = "packetization-mode=1";
-		sprop_parameter_sets += mode_str;
-		const char *replacement = sprop_parameter_sets.c_str();
-		// dirty munge by finding the packetization-mode=1 entry
-		dstr_replace(&dyn_offer, mode_str.c_str(), replacement);
-		// replace offer with munged version
-		///std::string munged_offer(dyn_offer.array);
-		///offer_sdp = munged_offer.c_str();
-		do_log(LOG_INFO, "Munged dynamic: %s %d", dyn_offer.array, dyn_offer.len);
-		//offer_sdp = dyn_offer.array;
-		// clean ups
-		dstr_free(&dyn_offer);
-		///munged_offer.clear();
-		sprop_parameter_sets.clear();
-		mode_str.clear();
-		do_log(LOG_INFO, "Munged offer: %s", offer_sdp);
-	}
 
 	CURL *c = curl_easy_init();
 	curl_easy_setopt(c, CURLOPT_WRITEFUNCTION, curl_writefunction);
@@ -361,8 +332,36 @@ bool WHIPOutput::Connect()
 	curl_easy_setopt(c, CURLOPT_HTTPHEADER, headers);
 	curl_easy_setopt(c, CURLOPT_URL, endpoint_url.c_str());
 	curl_easy_setopt(c, CURLOPT_POST, 1L);
-	curl_easy_setopt(c, CURLOPT_COPYPOSTFIELDS, offer_sdp);
 	curl_easy_setopt(c, CURLOPT_TIMEOUT, 8L);
+
+	if (sprop_parameter_sets.empty()) {
+		curl_easy_setopt(c, CURLOPT_COPYPOSTFIELDS, offer_sdp);
+	} else {
+		// TODO(paul) add sprops to the h264 media desc in our offer
+		std::string munged_sdp(offer_sdp);
+		// resize to fit what we're adding
+		munged_sdp.resize(munged_sdp.size() + sprop_parameter_sets.size());
+		// find the non-std group line
+		std::size_t index = munged_sdp.rfind("a=group:LS 0 1");
+  		if (index != std::string::npos) {
+			munged_sdp.erase(index, 16);
+		}
+		// find the index where we'll insert
+  		index = munged_sdp.rfind("packetization");
+		do_log(LOG_DEBUG, "Index of str: %d", index);
+  		if (index != std::string::npos) {
+			munged_sdp.insert(index, sprop_parameter_sets);
+		}
+		// shrink
+		munged_sdp.shrink_to_fit();
+		// prepend the search prop string
+		do_log(LOG_INFO, "Munged offer: %s", munged_sdp.c_str());
+		// use munged offer sdp version
+	    curl_easy_setopt(c, CURLOPT_COPYPOSTFIELDS, munged_sdp.c_str());
+		// clean ups
+		sprop_parameter_sets.clear();
+		munged_sdp.clear();
+	}
 
 	auto cleanup = [&]() {
 		curl_easy_cleanup(c);
@@ -477,7 +476,7 @@ void WHIPOutput::SendOptions()
 					std::size_t pos = 0, endpos = 0;
 					pos = str.find("<", 0) + 1;
 					endpos = str.find(">");
-					do_log(LOG_INFO, "Pos: %d %d %d", pos, endpos, std::string::npos);
+					//do_log(LOG_DEBUG, "Pos: %d %d %d", pos, endpos, std::string::npos);
 					turn_url = str.substr(pos, endpos - pos);
 					if (turn_url.empty()) {
 						do_log(LOG_WARNING, "Unable to process OPTIONS response");
