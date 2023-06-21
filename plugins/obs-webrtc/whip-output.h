@@ -17,6 +17,8 @@
 #include <iostream>
 #include <cstdint>
 #include <vector>
+#include <limits>
+#include <random>
 
 #include <rtc/rtc.h>
 
@@ -26,6 +28,11 @@
 #define do_log_s(level, format, ...)                            \
 	blog(level, "[obs-webrtc] [whip_output: '%s'] " format, \
 	     obs_output_get_name(whipOutput->output), ##__VA_ARGS__)
+
+// maximum size for a video fragment, keep it under a std MTU of 1500
+// effective range is 576-1470, with the lower the value equating to
+// more packets created
+const uint16_t max_fragment_size(1180);
 
 class WHIPOutput {
 public:
@@ -48,12 +55,22 @@ private:
     bool Init();
 	bool Setup();
 	bool Connect();
+	void Connected();
+	void Disconnected(bool normal);
 	void StartThread();
     void SendOptions();
 	void SendDelete();
 	void StopThread(bool signal);
 
-	void Send(void *data, uintptr_t size, uint64_t duration, int track);
+    /**
+     * @brief Send data on the specified track.
+     * 
+     * @param track 
+     * @param data 
+     * @param size 
+     * @param ts timestamp in milliseconds
+     */
+	void Send(int track, void *data, uintptr_t size, uint32_t ts);
 
 	obs_output_t *output;
 
@@ -65,6 +82,9 @@ private:
 
 	std::atomic<bool> running;
 
+    // whether or not the peer connection is connected
+	std::atomic<bool> peer_connected;
+
 	// sprops for h264
 	std::string sprop_parameter_sets;
 
@@ -75,8 +95,14 @@ private:
 	int audio_track;
 	int video_track;
 
+	// total overall bytes sent
 	std::atomic<size_t> total_bytes_sent;
+	// per-track bytes sent
+	std::atomic<size_t> total_audio_bytes_sent;
+	std::atomic<size_t> total_video_bytes_sent;
+
 	std::atomic<int> connect_time_ms;
+
 	int64_t start_time_ns;
 	int64_t last_audio_timestamp;
 	int64_t last_video_timestamp;
@@ -145,6 +171,44 @@ static size_t curl_header_link_function(char *data, size_t size, size_t nmemb,
 	return real_size;
 }
 
+/**
+ * @brief Generates a random integer for SSRC and starting RTP timestamp.
+ * 
+ * @return uint32_t 
+ */
+static uint32_t generate_random_u32() {
+  std::random_device rd;
+  std::mt19937 gen(rd());
+  std::uniform_int_distribution<uint32_t> dist(0, UINT32_MAX);
+  return dist(gen);
+}
+
+/**
+ * @brief Generates a timestamp for a given dts value and clock rate.
+ * 
+ * @param dts
+ * @param clock_rate
+ * @return uint32_t 
+ */
+static uint32_t generate_timestamp(uint64_t dts, uint32_t clock_rate) {
+	// convert microseconds dts into milliseconds
+	uint32_t dts_ms = static_cast<uint32_t>(dts / 1000);
+	// calculate the timestamp using the media clock rate
+	uint32_t rtp_timestamp = (dts_ms * 90000) / clock_rate;
+	// ensure that the timestamp is within the valid range
+	if (rtp_timestamp > 0xFFFFFFFF) {
+		rtp_timestamp = rtp_timestamp % 0xFFFFFFFF;
+	}
+	return rtp_timestamp;
+}
+
+/**
+ * @brief Parse data of the given length and return any h264 NALU found.
+ * 
+ * @param data 
+ * @param length 
+ * @return std::vector<std::vector<uint8_t>> 
+ */
 static std::vector<std::vector<uint8_t>> parse_h264_nals(const char* data, size_t length) {
     std::vector<std::vector<uint8_t>> nalus;
 

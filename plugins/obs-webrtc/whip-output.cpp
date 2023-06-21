@@ -5,12 +5,12 @@ const char signaling_media_id_valid_char[] = "0123456789"
 					     "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
 					     "abcdefghijklmnopqrstuvwxyz";
 
-const uint32_t audio_ssrc = 5002;
+const uint32_t audio_ssrc = generate_random_u32();
 const char *audio_mid = "0";
 const uint32_t audio_clockrate = 48000;
 const uint8_t audio_payload_type = 111;
 
-const uint32_t video_ssrc = 5000;
+const uint32_t video_ssrc = generate_random_u32();
 const char *video_mid = "1";
 const uint32_t video_clockrate = 90000;
 const uint8_t video_payload_type = 96;
@@ -39,11 +39,7 @@ WHIPOutput::WHIPOutput(obs_data_t *, obs_output_t *output)
 
 WHIPOutput::~WHIPOutput()
 {
-	Stop();
-
-	// std::lock_guard<std::mutex> l(start_stop_mutex);
-	// if (start_stop_thread.joinable())
-	// 	start_stop_thread.join();
+	Stop(true);
 }
 
 bool WHIPOutput::Start()
@@ -75,21 +71,24 @@ void WHIPOutput::Stop(bool signal)
 void WHIPOutput::Data(struct encoder_packet *packet)
 {
 	if (packet) {
-		// don't send media unless we're running
-		if (running) {
+		do_log(LOG_INFO, "Data packet: %d peer connected: %s connection: %d", packet->type, std::to_string(peer_connected), peer_connection);
+		// don't send media unless our peer is connected
+		if (peer_connected) {
+			size_t bytes_size = packet->size;
 			if (packet->type == OBS_ENCODER_AUDIO) {
+				Send(audio_track, packet->data, bytes_size,
+					generate_timestamp(packet->dts_usec, audio_clockrate));
 				int64_t duration = packet->dts_usec - last_audio_timestamp;
-				Send(packet->data, packet->size, duration, audio_track);
 				last_audio_timestamp = packet->dts_usec;
+				total_audio_bytes_sent += bytes_size;
 			} else if (packet->type == OBS_ENCODER_VIDEO) {
+				Send(video_track, packet->data, bytes_size,
+					generate_timestamp(packet->dts_usec, video_clockrate));
 				int64_t duration = packet->dts_usec - last_video_timestamp;
-				Send(packet->data, packet->size, duration, video_track);
 				last_video_timestamp = packet->dts_usec;
+				total_video_bytes_sent += bytes_size;
 			}
 		}
-	} else {
-		Stop(false);
-		obs_output_signal_stop(output, OBS_OUTPUT_ENCODE_ERROR);
 	}
 }
 
@@ -109,14 +108,19 @@ void WHIPOutput::ConfigureAudioTrack(std::string media_stream_id,
 		media_stream_track_id.c_str(),
 	};
 
-	rtcPacketizationHandlerInit packetizer_init = {audio_ssrc,
-						       cname.c_str(),
-						       audio_payload_type,
-						       audio_clockrate,
-						       0,
-						       0,
-						       RTC_NAL_SEPARATOR_LENGTH,
-						       0};
+	// generate the random starting ts for the audio track
+	uint32_t rtp_audio_timestamp = generate_random_u32();
+
+	rtcPacketizationHandlerInit packetizer_init = {
+		audio_ssrc,
+		cname.c_str(),
+		audio_payload_type,
+		audio_clockrate,
+		0,
+		rtp_audio_timestamp,
+		RTC_NAL_SEPARATOR_LENGTH,
+		0
+	};
 
 	audio_track = rtcAddTrackEx(peer_connection, &track_init);
 	rtcSetOpusPacketizationHandler(audio_track, &packetizer_init);
@@ -140,15 +144,19 @@ void WHIPOutput::ConfigureVideoTrack(std::string media_stream_id,
 		media_stream_track_id.c_str(),
 	};
 
+	// generate the random starting ts for the video track
+	uint32_t rtp_video_timestamp = generate_random_u32();
+
 	rtcPacketizationHandlerInit packetizer_init = {
 		video_ssrc,
 		cname.c_str(),
 		video_payload_type,
 		video_clockrate,
 		0,
-		0,
+		rtp_video_timestamp,
 		RTC_NAL_SEPARATOR_START_SEQUENCE,
-		0};
+		max_fragment_size
+	};
 
 	video_track = rtcAddTrackEx(peer_connection, &track_init);
 	rtcSetH264PacketizationHandler(video_track, &packetizer_init);
@@ -219,8 +227,8 @@ bool WHIPOutput::Init()
 	    uint8_t *header;
 	    size_t size;
 		if (obs_encoder_get_extra_data(video_enc, &header, &size)) {
-			do_log(LOG_INFO, "Got video extra data, size: %d", size);
-			do_log(LOG_INFO, "Sample critical data: %d, %d, %d, %d", header[0], header[1], header[2], header[3]);
+			do_log(LOG_DEBUG, "Got video extra data, size: %d", size);
+			do_log(LOG_DEBUG, "Sample critical data: %d, %d, %d, %d", header[0], header[1], header[2], header[3]);
 			// base64 encode the SPS/PPS data for our offer SDP
 			std::vector<std::vector<uint8_t>> nalus = parse_h264_nals((const char *) header, size);
 			do_log(LOG_DEBUG, "NALU count: %d", nalus.size());
@@ -278,8 +286,7 @@ bool WHIPOutput::Setup()
 	peer_connection = rtcCreatePeerConnection(&config);
 	rtcSetUserPointer(peer_connection, this);
 
-	rtcSetStateChangeCallback(peer_connection, [](int, rtcState state,
-						      void *ptr) {
+	rtcSetStateChangeCallback(peer_connection, [](int, rtcState state, void *ptr) {
 		auto whipOutput = static_cast<WHIPOutput *>(ptr);
 		switch (state) {
 		case RTC_NEW:
@@ -293,30 +300,26 @@ bool WHIPOutput::Setup()
 		case RTC_CONNECTED:
 			do_log_s(LOG_INFO,
 				 "PeerConnection state is now: Connected");
-			whipOutput->connect_time_ms =
-				(int)((os_gettime_ns() -
-				       whipOutput->start_time_ns) /
-				      1000000.0);
-			do_log_s(LOG_INFO, "Connect time: %dms",
-				 whipOutput->connect_time_ms.load());
+			// peer is connected, allow sending of data
+			whipOutput->Connected();
 			break;
 		case RTC_DISCONNECTED:
 			do_log_s(LOG_INFO,
 				 "PeerConnection state is now: Disconnected");
-			whipOutput->Stop(false);
-			obs_output_signal_stop(whipOutput->output,
-					       OBS_OUTPUT_DISCONNECTED);
+			// call disconnected as normal disconnect
+			whipOutput->Disconnected(true);
 			break;
 		case RTC_FAILED:
 			do_log_s(LOG_INFO,
 				 "PeerConnection state is now: Failed");
-			whipOutput->Stop(false);
-			obs_output_signal_stop(whipOutput->output,
-					       OBS_OUTPUT_ERROR);
+			// call disconnected, but indicate its due to failure
+			whipOutput->Disconnected(false);
 			break;
 		case RTC_CLOSED:
 			do_log_s(LOG_INFO,
 				 "PeerConnection state is now: Closed");
+			// peer was closed without notification of disconnect or failure
+			whipOutput->peer_connected = false;
 			break;
 		}
 	});
@@ -461,6 +464,33 @@ bool WHIPOutput::Connect()
 	return true;
 }
 
+// peer connection is connected
+void WHIPOutput::Connected()
+{
+	peer_connected = true;
+
+	connect_time_ms = (int)((os_gettime_ns() - start_time_ns) / 1000000.0);
+	do_log(LOG_INFO, "Connect time: %dms", connect_time_ms.load());
+}
+
+// peer connection is disconnected
+void WHIPOutput::Disconnected(bool normal)
+{
+	do_log(LOG_INFO, "Disconnected - peer connected: %s", std::to_string(peer_connected));
+
+	if (peer_connected) {
+		peer_connected = false;
+
+		Stop(false);
+
+		if (normal) {
+			obs_output_signal_stop(output, OBS_OUTPUT_DISCONNECTED);
+		} else {
+			obs_output_signal_stop(output, OBS_OUTPUT_ERROR);
+		}
+	}
+}
+
 void WHIPOutput::SendOptions()
 {
 	if (endpoint_url.empty()) {
@@ -517,7 +547,6 @@ void WHIPOutput::SendOptions()
 					std::size_t pos = 0, endpos = 0;
 					pos = str.find("<", 0) + 1;
 					endpos = str.find(">");
-					//do_log(LOG_DEBUG, "Pos: %d %d %d", pos, endpos, std::string::npos);
 					turn_url = str.substr(pos, endpos - pos);
 					if (turn_url.empty()) {
 						do_log(LOG_WARNING, "Unable to process OPTIONS response");
@@ -525,7 +554,6 @@ void WHIPOutput::SendOptions()
 						do_log(LOG_INFO, "WHIP TURN/STUN is: %s", turn_url.c_str());
 					}
 				}
-				//curl_free(link_header_data);
 				link_header.clear();
 			}
 		} else {
@@ -608,10 +636,7 @@ void WHIPOutput::StartThread()
 		return;
 
 	if (!Connect()) {
-		rtcDeletePeerConnection(peer_connection);
-		peer_connection = -1;
-		audio_track = -1;
-		video_track = -1;
+		Stop(false);
 		return;
 	}
 
@@ -621,6 +646,8 @@ void WHIPOutput::StartThread()
 
 void WHIPOutput::StopThread(bool signal)
 {
+	do_log(LOG_INFO,
+	       "Stop %s thread with%s, peer: %d", (running ? "active" : "in-active"), (signal ? " signal" : "out signal"), peer_connection);
 	if (peer_connection != -1) {
 		rtcDeletePeerConnection(peer_connection);
 		peer_connection = -1;
@@ -628,7 +655,9 @@ void WHIPOutput::StopThread(bool signal)
 		video_track = -1;
 	}
 
-	SendDelete();
+	if (peer_connected) {
+		SendDelete();
+	}
 
 	// "signal" exists because we have to preserve the "running" state
 	// across reconnect attempts. If we don't emit a signal if
@@ -637,6 +666,7 @@ void WHIPOutput::StopThread(bool signal)
 	// "reconnecting", but the "stop" signal will have never been
 	// emitted.
 	if (running && signal) {
+		do_log(LOG_INFO, "Sending signal and flipping to in-active");
 		obs_output_signal_stop(output, OBS_OUTPUT_SUCCESS);
 		running = false;
 	}
@@ -648,23 +678,16 @@ void WHIPOutput::StopThread(bool signal)
 	last_video_timestamp = 0;
 }
 
-void WHIPOutput::Send(void *data, uintptr_t size, uint64_t duration, int track)
+void WHIPOutput::Send(int track, void *data, uintptr_t size, uint32_t ts)
 {
-	// sample time is in us, we need to convert it to seconds
-	auto elapsed_seconds = double(duration) / (1000.0 * 1000.0);
-
-	// get elapsed time in clock rate
-	uint32_t elapsed_timestamp = 0;
-	rtcTransformSecondsToTimestamp(track, elapsed_seconds,
-				       &elapsed_timestamp);
-
-	// set new timestamp
 	uint32_t current_timestamp = 0;
 	rtcGetCurrentTrackTimestamp(track, &current_timestamp);
-	rtcSetTrackRtpTimestamp(track, current_timestamp + elapsed_timestamp);
+	do_log(LOG_DEBUG, "Sending timestamp: %d current: %d", ts, current_timestamp);
+
+	rtcSetTrackRtpTimestamp(track, current_timestamp + ts);
+	rtcSendMessage(track, reinterpret_cast<const char *>(data), (int) size);
 
 	total_bytes_sent += size;
-	rtcSendMessage(track, reinterpret_cast<const char *>(data), (int)size);
 }
 
 void register_whip_output()
