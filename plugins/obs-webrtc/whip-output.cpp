@@ -39,7 +39,7 @@ WHIPOutput::WHIPOutput(obs_data_t *, obs_output_t *output)
 
 WHIPOutput::~WHIPOutput()
 {
-	Stop(true);
+	Stop(false);
 }
 
 bool WHIPOutput::Start()
@@ -71,22 +71,20 @@ void WHIPOutput::Stop(bool signal)
 void WHIPOutput::Data(struct encoder_packet *packet)
 {
 	if (packet) {
-		do_log(LOG_INFO, "Data packet: %d peer connected: %s connection: %d", packet->type, std::to_string(peer_connected), peer_connection);
+		do_log(LOG_INFO, "Data packet: %d peer connection: %d", packet->type, peer_connection);
 		// don't send media unless our peer is connected
-		if (peer_connected) {
+		if (peer_connection != -1) {
 			size_t bytes_size = packet->size;
 			if (packet->type == OBS_ENCODER_AUDIO) {
 				Send(audio_track, packet->data, bytes_size,
 					generate_timestamp(packet->dts_usec, audio_clockrate));
 				int64_t duration = packet->dts_usec - last_audio_timestamp;
 				last_audio_timestamp = packet->dts_usec;
-				total_audio_bytes_sent += bytes_size;
 			} else if (packet->type == OBS_ENCODER_VIDEO) {
 				Send(video_track, packet->data, bytes_size,
 					generate_timestamp(packet->dts_usec, video_clockrate));
 				int64_t duration = packet->dts_usec - last_video_timestamp;
 				last_video_timestamp = packet->dts_usec;
-				total_video_bytes_sent += bytes_size;
 			}
 		}
 	}
@@ -318,8 +316,6 @@ bool WHIPOutput::Setup()
 		case RTC_CLOSED:
 			do_log_s(LOG_INFO,
 				 "PeerConnection state is now: Closed");
-			// peer was closed without notification of disconnect or failure
-			whipOutput->peer_connected = false;
 			break;
 		}
 	});
@@ -467,8 +463,6 @@ bool WHIPOutput::Connect()
 // peer connection is connected
 void WHIPOutput::Connected()
 {
-	peer_connected = true;
-
 	connect_time_ms = (int)((os_gettime_ns() - start_time_ns) / 1000000.0);
 	do_log(LOG_INFO, "Connect time: %dms", connect_time_ms.load());
 }
@@ -476,10 +470,8 @@ void WHIPOutput::Connected()
 // peer connection is disconnected
 void WHIPOutput::Disconnected(bool normal)
 {
-	do_log(LOG_INFO, "Disconnected - peer connected: %s", std::to_string(peer_connected));
-
-	if (peer_connected) {
-		peer_connected = false;
+	do_log(LOG_INFO, "Disconnected - peer connection: %d", peer_connection);
+	if (peer_connection != -1) {
 
 		Stop(false);
 
@@ -647,16 +639,16 @@ void WHIPOutput::StartThread()
 void WHIPOutput::StopThread(bool signal)
 {
 	do_log(LOG_INFO,
-	       "Stop %s thread with%s, peer: %d", (running ? "active" : "in-active"), (signal ? " signal" : "out signal"), peer_connection);
+	       "Stop %s thread with%s, peer connection: %d",
+		   (running ? "active" : "in-active"),
+		   (signal ? " signal" : "out signal"), peer_connection);
+
 	if (peer_connection != -1) {
+		SendDelete();
 		rtcDeletePeerConnection(peer_connection);
 		peer_connection = -1;
 		audio_track = -1;
 		video_track = -1;
-	}
-
-	if (peer_connected) {
-		SendDelete();
 	}
 
 	// "signal" exists because we have to preserve the "running" state

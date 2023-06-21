@@ -82,9 +82,6 @@ private:
 
 	std::atomic<bool> running;
 
-    // whether or not the peer connection is connected
-	std::atomic<bool> peer_connected;
-
 	// sprops for h264
 	std::string sprop_parameter_sets;
 
@@ -97,9 +94,6 @@ private:
 
 	// total overall bytes sent
 	std::atomic<size_t> total_bytes_sent;
-	// per-track bytes sent
-	std::atomic<size_t> total_audio_bytes_sent;
-	std::atomic<size_t> total_video_bytes_sent;
 
 	std::atomic<int> connect_time_ms;
 
