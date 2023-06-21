@@ -15,8 +15,8 @@ const char *video_mid = "1";
 const uint32_t video_clockrate = 90000;
 const uint8_t video_payload_type = 96;
 
-// user-agent to use for requests
-std::string user_agent = "User-Agent: Mozilla/5.0 (OBS-Studio/29.1.0; Windows 11)";
+// user-agent to use for requests constructed at Init()
+std::string user_agent;
 
 WHIPOutput::WHIPOutput(obs_data_t *, obs_output_t *output)
 	: output(output),
@@ -162,6 +162,39 @@ void WHIPOutput::ConfigureVideoTrack(std::string media_stream_id,
  */
 bool WHIPOutput::Init()
 {
+	// construct operating system info string
+	std::stringstream os_info;
+#ifdef _WIN32
+	os_info << "Windows";
+#elif _WIN64
+	os_info << "Windows x86_64";
+#elif __APPLE__
+	os_info << "MacOs";
+#elif __OpenBSD__
+	os_info << "OpenBSD";
+#elif __FreeBSD__
+	os_info << "FreeBSD ";
+#elif __linux__ && __LP64__
+	os_info << "Linux x86_64";
+#else
+	os_info << "Linux";
+#endif	
+	// construct information for our user-agent
+	uint32_t obs_ver = obs_get_version();
+	// build the user-agent string
+	std::stringstream ua;
+	// user agent header prefix
+	ua << "User-Agent: Mozilla/5.0 ";
+	// obs version info
+	ua << "(OBS-Studio/" << std::to_string(obs_ver >> 24) << "."
+		<< std::to_string((obs_ver >> 16) & 0xFF) << "."
+		<< std::to_string(obs_ver & 0xFFFF) << "; ";
+    // operating system version info
+	ua << os_info.str() << "; " << obs_get_locale() << ")";
+	// set our user-agent string for use in requests
+	user_agent = ua.str();
+	do_log(LOG_INFO, "Generated UA: %s", user_agent.c_str());
+
 	obs_service_t *service = obs_output_get_service(output);
 	if (!service) {
 		obs_output_signal_stop(output, OBS_OUTPUT_ERROR);
@@ -174,6 +207,7 @@ bool WHIPOutput::Init()
 		obs_output_signal_stop(output, OBS_OUTPUT_BAD_PATH);
 		return false;
 	}
+
 	bearer_token = obs_service_get_connect_info(
 		service, OBS_SERVICE_CONNECT_INFO_BEARER_TOKEN);
 	

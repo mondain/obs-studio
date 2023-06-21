@@ -10,6 +10,7 @@
 #include <util/dstr.h>
 
 #include <string>
+#include <sstream>
 #include <atomic>
 #include <mutex>
 #include <thread>
