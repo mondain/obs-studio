@@ -15,6 +15,9 @@ const char *video_mid = "1";
 const uint32_t video_clockrate = 90000;
 const uint8_t video_payload_type = 96;
 
+// user-agent to use for requests
+std::string user_agent = "User-Agent: Mozilla/5.0 (OBS-Studio/29.1.0; Windows 11)";
+
 WHIPOutput::WHIPOutput(obs_data_t *, obs_output_t *output)
 	: output(output),
 	  endpoint_url(),
@@ -321,6 +324,9 @@ bool WHIPOutput::Connect()
 	char offer_sdp[4096] = {0};
 	rtcGetLocalDescription(peer_connection, offer_sdp, sizeof(offer_sdp));
 
+	// add user-agent to our requests
+	headers = curl_slist_append(headers, user_agent.c_str());
+
 	CURL *c = curl_easy_init();
 	curl_easy_setopt(c, CURLOPT_WRITEFUNCTION, curl_writefunction);
 	curl_easy_setopt(c, CURLOPT_WRITEDATA, (void *)&read_buffer);
@@ -439,6 +445,9 @@ void WHIPOutput::SendOptions()
 
 	std::string link_header;
 
+	// add user-agent to our requests
+	headers = curl_slist_append(headers, user_agent.c_str());
+
 	CURL *c = curl_easy_init();
 	curl_easy_setopt(c, CURLOPT_HEADERFUNCTION, curl_header_link_function);
 	curl_easy_setopt(c, CURLOPT_HEADERDATA, (void *)&link_header);
@@ -513,6 +522,9 @@ void WHIPOutput::SendDelete()
 		headers =
 			curl_slist_append(headers, bearer_token_header.c_str());
 	}
+
+	// add user-agent to our requests
+	headers = curl_slist_append(headers, user_agent.c_str());
 
 	CURL *c = curl_easy_init();
 	curl_easy_setopt(c, CURLOPT_HTTPHEADER, headers);
