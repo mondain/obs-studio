@@ -650,24 +650,21 @@ void WHIPOutput::StopThread(bool signal)
 
 void WHIPOutput::Send(void *data, uintptr_t size, uint64_t duration, int track)
 {
-	// packet contents and length
-	const char *data_bytes = reinterpret_cast<const char *>(data);
-	int data_len = (int) size;
 	// sample time is in us, we need to convert it to seconds
 	auto elapsed_seconds = double(duration) / (1000.0 * 1000.0);
 
 	// get elapsed time in clock rate
 	uint32_t elapsed_timestamp = 0;
 	rtcTransformSecondsToTimestamp(track, elapsed_seconds,
-					&elapsed_timestamp);
+				       &elapsed_timestamp);
 
 	// set new timestamp
 	uint32_t current_timestamp = 0;
 	rtcGetCurrentTrackTimestamp(track, &current_timestamp);
 	rtcSetTrackRtpTimestamp(track, current_timestamp + elapsed_timestamp);
 
-	total_bytes_sent += data_len;
-	rtcSendMessage(track, data_bytes, data_len);
+	total_bytes_sent += size;
+	rtcSendMessage(track, reinterpret_cast<const char *>(data), (int)size);
 }
 
 void register_whip_output()
