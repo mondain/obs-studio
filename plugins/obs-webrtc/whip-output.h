@@ -55,12 +55,12 @@ private:
     bool Init();
 	bool Setup();
 	bool Connect();
-	void Connected();
-	void Disconnected(bool normal);
 	void StartThread();
     void SendOptions();
 	void SendDelete();
 	void StopThread(bool signal);
+
+	void UpdateStopCode(int code);
 
     /**
      * @brief Send data on the specified track.
@@ -73,6 +73,8 @@ private:
 	void Send(int track, void *data, uintptr_t size, uint32_t ts);
 
 	obs_output_t *output;
+
+	int stop_code;
 
 	std::string endpoint_url;
 	std::string bearer_token;
@@ -89,6 +91,7 @@ private:
 	std::thread start_stop_thread;
 
 	int peer_connection;
+
 	int audio_track;
 	int video_track;
 

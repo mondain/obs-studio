@@ -26,9 +26,9 @@ WHIPOutput::WHIPOutput(obs_data_t *, obs_output_t *output)
 	  running(false),
 	  start_stop_mutex(),
 	  start_stop_thread(),
-	  peer_connection(-1),
 	  audio_track(-1),
 	  video_track(-1),
+	  peer_connection(-1),
 	  total_bytes_sent(0),
 	  connect_time_ms(0),
 	  start_time_ns(0),
@@ -39,17 +39,18 @@ WHIPOutput::WHIPOutput(obs_data_t *, obs_output_t *output)
 
 WHIPOutput::~WHIPOutput()
 {
-	Stop(false);
+	Stop(true);
+
+	std::lock_guard<std::mutex> l(start_stop_mutex);
+	if (start_stop_thread.joinable())
+		start_stop_thread.join();
 }
 
 bool WHIPOutput::Start()
 {
-	std::lock_guard<std::mutex> l(start_stop_mutex);
+	do_log(LOG_INFO, "Start - peer connection: %s", std::to_string(peer_connection));
 
-	if (!obs_output_can_begin_data_capture(output, 0))
-		return false;
-	if (!obs_output_initialize_encoders(output, 0))
-		return false;
+	std::lock_guard<std::mutex> l(start_stop_mutex);
 
 	if (start_stop_thread.joinable())
 		start_stop_thread.join();
@@ -61,17 +62,26 @@ bool WHIPOutput::Start()
 
 void WHIPOutput::Stop(bool signal)
 {
+	do_log(LOG_INFO, "Stop - signal: %s peer connection: %s", std::to_string(signal), std::to_string(peer_connection));
+
 	std::lock_guard<std::mutex> l(start_stop_mutex);
+
 	if (start_stop_thread.joinable())
 		start_stop_thread.join();
 
 	start_stop_thread = std::thread(&WHIPOutput::StopThread, this, signal);
 }
 
+void WHIPOutput::UpdateStopCode(int code) 
+{
+	stop_code = code;
+	obs_output_signal_stop(output, stop_code);
+}
+
 void WHIPOutput::Data(struct encoder_packet *packet)
 {
 	if (packet) {
-		do_log(LOG_INFO, "Data packet: %d peer connection: %d", packet->type, peer_connection);
+		//do_log(LOG_INFO, "Data packet: %d peer connection: %d", packet->type, peer_connection);
 		// don't send media unless our peer is connected
 		if (peer_connection != -1) {
 			size_t bytes_size = packet->size;
@@ -87,6 +97,9 @@ void WHIPOutput::Data(struct encoder_packet *packet)
 				last_video_timestamp = packet->dts_usec;
 			}
 		}
+	} else {
+		UpdateStopCode(OBS_OUTPUT_ENCODE_ERROR);
+		Stop(false);
 	}
 }
 
@@ -200,23 +213,31 @@ bool WHIPOutput::Init()
 	// set our user-agent string for use in requests
 	user_agent = ua.str();
 	do_log(LOG_INFO, "Generated UA: %s", user_agent.c_str());
+	
+	if (!obs_output_can_begin_data_capture(output, 0))
+		return false;
+
+	if (!obs_output_initialize_encoders(output, 0))
+		return false;
 
 	obs_service_t *service = obs_output_get_service(output);
 	if (!service) {
-		obs_output_signal_stop(output, OBS_OUTPUT_ERROR);
+		UpdateStopCode(OBS_OUTPUT_ERROR);
+		Stop(false);
 		return false;
 	}
 
 	endpoint_url = obs_service_get_connect_info(
 		service, OBS_SERVICE_CONNECT_INFO_SERVER_URL);
 	if (endpoint_url.empty()) {
-		obs_output_signal_stop(output, OBS_OUTPUT_BAD_PATH);
+		UpdateStopCode(OBS_OUTPUT_BAD_PATH);
+		Stop(false);
 		return false;
 	}
 
 	bearer_token = obs_service_get_connect_info(
 		service, OBS_SERVICE_CONNECT_INFO_BEARER_TOKEN);
-	
+
 	// get video extra data as needed
 	obs_encoder_t *video_enc = obs_output_get_video_encoder(output);
 	if (video_enc) {
@@ -286,38 +307,38 @@ bool WHIPOutput::Setup()
 
 	rtcSetStateChangeCallback(peer_connection, [](int, rtcState state, void *ptr) {
 		auto whipOutput = static_cast<WHIPOutput *>(ptr);
+		// handle states as needed
 		switch (state) {
 		case RTC_NEW:
 			do_log_s(LOG_INFO, "PeerConnection state is now: New");
 			break;
 		case RTC_CONNECTING:
-			do_log_s(LOG_INFO,
-				 "PeerConnection state is now: Connecting");
+			do_log_s(LOG_INFO, "PeerConnection state is now: Connecting");
 			whipOutput->start_time_ns = os_gettime_ns();
 			break;
 		case RTC_CONNECTED:
-			do_log_s(LOG_INFO,
-				 "PeerConnection state is now: Connected");
+			do_log_s(LOG_INFO, "PeerConnection state is now: Connected");
 			// peer is connected, allow sending of data
-			whipOutput->Connected();
+			whipOutput->connect_time_ms = (int)((os_gettime_ns() - whipOutput->start_time_ns) / 1000000.0);
+			do_log_s(LOG_INFO, "Connect time: %dms", whipOutput->connect_time_ms.load());
 			break;
 		case RTC_DISCONNECTED:
-			do_log_s(LOG_INFO,
-				 "PeerConnection state is now: Disconnected");
-			// call disconnected as normal disconnect
-			whipOutput->Disconnected(true);
+			do_log_s(LOG_INFO, "PeerConnection state is now: Disconnected");
+			// normal disconnect
+			whipOutput->UpdateStopCode(OBS_OUTPUT_DISCONNECTED);
+			//whipOutput->Stop(false);
 			break;
 		case RTC_FAILED:
-			do_log_s(LOG_INFO,
-				 "PeerConnection state is now: Failed");
-			// call disconnected, but indicate its due to failure
-			whipOutput->Disconnected(false);
+			do_log_s(LOG_INFO, "PeerConnection state is now: Failed");
+			// disconnect due to failure
+			whipOutput->UpdateStopCode(OBS_OUTPUT_ERROR);
+			//whipOutput->Stop(false);
 			break;
 		case RTC_CLOSED:
-			do_log_s(LOG_INFO,
-				 "PeerConnection state is now: Closed");
+			do_log_s(LOG_INFO, "PeerConnection state is now: Closed");
 			break;
 		}
+		do_log_s(LOG_INFO, "Stop code: %s", std::to_string(whipOutput->stop_code));
 	});
 
 	std::string media_stream_id, cname;
@@ -409,7 +430,8 @@ bool WHIPOutput::Connect()
 		do_log(LOG_WARNING,
 		       "Connect failed: CURL returned result not CURLE_OK");
 		cleanup();
-		obs_output_signal_stop(output, OBS_OUTPUT_CONNECT_FAILED);
+		UpdateStopCode(OBS_OUTPUT_CONNECT_FAILED);
+		Stop(false);
 		return false;
 	}
 
@@ -420,7 +442,8 @@ bool WHIPOutput::Connect()
 		       "Connect failed: HTTP endpoint returned response code %ld",
 		       response_code);
 		cleanup();
-		obs_output_signal_stop(output, OBS_OUTPUT_INVALID_STREAM);
+		UpdateStopCode(OBS_OUTPUT_INVALID_STREAM);
+		Stop(false);
 		return false;
 	}
 
@@ -428,7 +451,8 @@ bool WHIPOutput::Connect()
 		do_log(LOG_WARNING,
 		       "Connect failed: No data returned from HTTP endpoint request");
 		cleanup();
-		obs_output_signal_stop(output, OBS_OUTPUT_CONNECT_FAILED);
+		UpdateStopCode(OBS_OUTPUT_CONNECT_FAILED);
+		Stop(false);
 		return false;
 	}
 
@@ -458,29 +482,6 @@ bool WHIPOutput::Connect()
 	rtcSetRemoteDescription(peer_connection, read_buffer.c_str(), "answer");
 	cleanup();
 	return true;
-}
-
-// peer connection is connected
-void WHIPOutput::Connected()
-{
-	connect_time_ms = (int)((os_gettime_ns() - start_time_ns) / 1000000.0);
-	do_log(LOG_INFO, "Connect time: %dms", connect_time_ms.load());
-}
-
-// peer connection is disconnected
-void WHIPOutput::Disconnected(bool normal)
-{
-	do_log(LOG_INFO, "Disconnected - peer connection: %d", peer_connection);
-	if (peer_connection != -1) {
-
-		Stop(false);
-
-		if (normal) {
-			obs_output_signal_stop(output, OBS_OUTPUT_DISCONNECTED);
-		} else {
-			obs_output_signal_stop(output, OBS_OUTPUT_ERROR);
-		}
-	}
 }
 
 void WHIPOutput::SendOptions()
@@ -563,6 +564,8 @@ void WHIPOutput::SendOptions()
 
 void WHIPOutput::SendDelete()
 {
+	do_log(LOG_INFO, "Send DELETE");
+
 	if (resource_url.empty()) {
 		do_log(LOG_DEBUG,
 		       "No resource URL available, not sending DELETE");
@@ -628,7 +631,7 @@ void WHIPOutput::StartThread()
 		return;
 
 	if (!Connect()) {
-		Stop(false);
+		rtcDeletePeerConnection(peer_connection);
 		return;
 	}
 
@@ -639,9 +642,9 @@ void WHIPOutput::StartThread()
 void WHIPOutput::StopThread(bool signal)
 {
 	do_log(LOG_INFO,
-	       "Stop %s thread with%s, peer connection: %d",
+	       "Stop %s thread with%s, peer connection: %s",
 		   (running ? "active" : "in-active"),
-		   (signal ? " signal" : "out signal"), peer_connection);
+		   (signal ? " signal" : "out signal"), std::to_string(peer_connection));
 
 	if (peer_connection != -1) {
 		SendDelete();
@@ -659,8 +662,8 @@ void WHIPOutput::StopThread(bool signal)
 	// emitted.
 	if (running && signal) {
 		do_log(LOG_INFO, "Sending signal and flipping to in-active");
-		obs_output_signal_stop(output, OBS_OUTPUT_SUCCESS);
 		running = false;
+		obs_output_signal_stop(output, stop_code);
 	}
 
 	total_bytes_sent = 0;
